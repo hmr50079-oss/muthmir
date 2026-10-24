@@ -1,5 +1,4 @@
-# إعدادات Supabase المحلية — لا تُرفع إلى Git
-supabase-config.js
+# إعدادات محلية اختيارية — لا تُرفع إلى Git
 supabase-config.local.js
 supabase-config.*.local.js
 

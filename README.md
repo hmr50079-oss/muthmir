@@ -6,7 +6,7 @@
 
 لا يحتاج المشروع إلى بناء أو تثبيت حزم:
 
-1. أضف إعدادات Supabase كما في القسم التالي.
+1. ملف `supabase-config.js` مضمّن ويحتوي عنوان المشروع والمفتاح العام. عدّله فقط إذا كنت تستخدم مشروع Supabase آخر.
 2. افتح `index.html` مباشرة في المتصفح، أو
 3. شغّل خادمًا محليًا بسيطًا من مجلد المشروع ثم افتح:
    `http://localhost:4173/`
@@ -35,7 +35,9 @@
 
 ### 2) إعدادات الاتصال
 
-1. انسخ `supabase-config.example.js` إلى `supabase-config.js`.
+المشروع يتضمن `supabase-config.js` جاهزًا بعنوان المشروع والمفتاح العام. إذا كنت تستخدم مشروع Supabase آخر:
+
+1. عدّل `supabase-config.js` مباشرة، أو انسخ `supabase-config.example.js` إليه.
 2. من لوحة Supabase، اذهب إلى **Project Settings → API**.
 3. ضع `Project URL` في `url`.
 4. ضع **anon / publishable key** في `anonKey`.
@@ -47,7 +49,7 @@ window.MUTHMIR_SUPABASE = {
 };
 ```
 
-> `supabase-config.js` مستثنى من Git عبر `.gitignore`. لا تضع مفتاح `service_role` في هذا الملف أو في أي ملف يصل إلى المتصفح.
+> المفتاح العام (anon / publishable) **مصمم للاستخدام في المتصفح ويمكن رفعه إلى Git**. الحماية الحقيقية تأتي من سياسات RLS. لا تضع مفتاح `service_role` في هذا الملف أو في أي ملف يصل إلى المتصفح.
 
 ### 3) إعدادات المصادقة
 
@@ -87,7 +89,7 @@ window.MUTHMIR_SUPABASE = {
 ├── app.js                     # الواجهة، المهام، التذكيرات، الإعدادات
 ├── supabase-api.js            # طبقة الاتصال بـ Supabase (مصادقة + CRUD)
 ├── supabase-config.example.js # قالب إعدادات الاتصال (يُنسخ إلى supabase-config.js)
-├── supabase-config.js         # إعدادات محلية مستثناة من Git (لا تُرفع)
+├── supabase-config.js         # إعدادات الاتصال العامة (publishable فقط)
 ├── supabase/schema.sql        # الجدول، الفهارس، RLS، ودوال الاستيراد والحذف
 ├── favicon.svg                # أيقونة الموقع
 └── README.md

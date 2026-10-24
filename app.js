@@ -767,7 +767,7 @@
         '<h1 class="auth-title">اربط مثمر بـ <span>Supabase</span></h1>' +
         '<p class="auth-lead">' + lead + '</p>' +
         '<div class="auth-alert">' + icon("alert") + '<span>استخدم المفتاح العام (anon / publishable) فقط، ولا تضع مفتاح service_role في الواجهة أبدًا.</span></div>' +
-        '<div class="auth-trust">' + icon("shield") + '<span>ملف الإعدادات مستثنى من Git، ولن يُرفع إلى المستودع.</span></div>' +
+        '<div class="auth-trust">' + icon("shield") + '<span>نستخدم المفتاح العام فقط، والحماية الحقيقية تأتي من سياسات RLS.</span></div>' +
       '</div>';
   }
 
