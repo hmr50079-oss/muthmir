@@ -1,0 +1,13 @@
+# إعدادات Supabase المحلية — لا تُرفع إلى Git
+supabase-config.js
+supabase-config.local.js
+supabase-config.*.local.js
+
+# أسرار الخادم وملفات البيئة
+.env
+.env.*
+supabase/.env
+supabase/functions/.env
+secure/
+*.service-role*
+*service_role*

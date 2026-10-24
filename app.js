@@ -1,17 +1,10 @@
-/* مثمر — مساحة شخصية لإدارة المهام والأولويات (RTL, localStorage) */
+/* مثمر — مساحة شخصية لإدارة المهام والأولويات (RTL, Supabase) */
 (function () {
   "use strict";
 
   /* ---------- ثوابت وهوية ---------- */
-  const KEYS = {
-    users: "muthmir:users:v1",
-    session: "muthmir:session:v1",
-    data: "muthmir:data:v1:"
-  };
-
+  const API = window.MuthmirAPI;
   const DEMO = {
-    email: "demo@muthmir.app",
-    password: "Muthmir2026!",
     name: "ريم العتيبي"
   };
 
@@ -66,6 +59,8 @@
   let pendingTaskRender = null;
   let lastKnownDay = "";
   let activeModal = null;
+  const savingTaskIds = new Set();
+  let signingOut = false;
 
   /* ---------- أدوات عامة ---------- */
   function esc(value) {
@@ -82,11 +77,15 @@
     return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(normalizeEmail(value));
   }
 
-  function uid(prefix) {
+  function newId() {
     if (window.crypto && typeof window.crypto.randomUUID === "function") {
-      return (prefix || "id") + "_" + window.crypto.randomUUID();
+      return window.crypto.randomUUID();
     }
-    return (prefix || "id") + "_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 10);
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (char) {
+      const random = Math.random() * 16 | 0;
+      const value = char === "x" ? random : (random & 0x3) | 0x8;
+      return value.toString(16);
+    });
   }
 
   function firstName(name) {
@@ -260,183 +259,54 @@
     return pluralForm;
   }
 
-  function safeStoreGet(store, key) {
-    try { return store.getItem(key); } catch (error) { return null; }
+  /* ---------- الحساب والبيانات السحابية ---------- */
+  function mapAuthUser(user) {
+    const meta = user.user_metadata || {};
+    const email = user.email || "";
+    const isDemo = !!user.is_anonymous || (user.app_metadata && user.app_metadata.provider === "anonymous");
+    return {
+      id: user.id,
+      name: String(meta.full_name || "").trim() || (email ? email.split("@")[0] : DEMO.name),
+      email: email || "مساحة تجريبية",
+      isDemo: !!isDemo,
+      createdAt: user.created_at || new Date().toISOString()
+    };
   }
 
-  function safeStoreSet(store, key, value) {
-    try { store.setItem(key, value); return true; } catch (error) { return false; }
-  }
-
-  function safeStoreRemove(store, key) {
-    try { store.removeItem(key); } catch (error) { /* لا شيء */ }
-  }
-
-  /* ---------- حسابات وتخزين ---------- */
-  function getUsers() {
-    const raw = safeStoreGet(localStorage, KEYS.users);
-    if (!raw) return [];
-    try {
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (error) {
-      return [];
-    }
-  }
-
-  function saveUsers(users) {
-    return safeStoreSet(localStorage, KEYS.users, JSON.stringify(users));
-  }
-
-  function userDataKey(userId) {
-    return KEYS.data + userId;
-  }
-
-  function createEmptyData() {
+  async function loadRemoteData(user) {
+    if (!API || !API.configured) throw new Error("SUPABASE_NOT_CONFIGURED");
+    const tasks = await API.tasks.list();
     return {
       version: 1,
-      tasks: [],
-      settings: { notificationsAsked: false },
-      createdAt: new Date().toISOString()
+      tasks: tasks,
+      settings: {
+        notificationsAsked: !!(user.user_metadata && user.user_metadata.notifications_asked)
+      },
+      createdAt: user.created_at || new Date().toISOString()
     };
   }
 
-  function normalizeData(raw) {
-    const data = raw && typeof raw === "object" ? raw : {};
-    return {
-      version: 1,
-      tasks: Array.isArray(data.tasks) ? data.tasks.filter(Boolean) : [],
-      settings: data.settings && typeof data.settings === "object" ? data.settings : { notificationsAsked: false },
-      createdAt: data.createdAt || new Date().toISOString()
-    };
-  }
-
-  function loadUserData(userId) {
-    const raw = safeStoreGet(localStorage, userDataKey(userId));
-    if (!raw) {
-      const fresh = createEmptyData();
-      safeStoreSet(localStorage, userDataKey(userId), JSON.stringify(fresh));
-      return fresh;
-    }
+  async function saveNotificationsAsked(value) {
+    if (!API || !API.configured) return;
     try {
-      return normalizeData(JSON.parse(raw));
+      await API.auth.updateProfile({ notifications_asked: !!value });
     } catch (error) {
-      return createEmptyData();
+      /* خيار واجهة غير حرج، لا نعطّل التذكيرات المحلية بسببه */
     }
   }
 
-  function persistData() {
-    if (!state.user || !state.data) return false;
-    const ok = safeStoreSet(localStorage, userDataKey(state.user.id), JSON.stringify(state.data));
-    if (!ok) {
-      toast("تعذّر حفظ البيانات. قد تكون مساحة التخزين في المتصفح ممتلئة.", { type: "error" });
-    }
-    return ok;
-  }
-
-  function bytesToHex(bytes) {
-    return Array.from(bytes).map(function (byte) { return byte.toString(16).padStart(2, "0"); }).join("");
-  }
-
-  function hexToBytes(hex) {
-    const bytes = new Uint8Array(hex.length / 2);
-    for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
-    return bytes;
-  }
-
-  function randomSalt() {
-    if (window.crypto && typeof window.crypto.getRandomValues === "function") {
-      const bytes = new Uint8Array(16);
-      window.crypto.getRandomValues(bytes);
-      return bytesToHex(bytes);
-    }
-    let salt = "";
-    for (let i = 0; i < 32; i++) salt += Math.floor(Math.random() * 16).toString(16);
-    return salt;
-  }
-
-  function fallbackHash(value) {
-    let h1 = 0x811c9dc5;
-    let h2 = 0x1000193;
-    for (let round = 0; round < 6000; round++) {
-      for (let i = 0; i < value.length; i++) {
-        const code = value.charCodeAt(i) + round;
-        h1 = Math.imul(h1 ^ code, 0x01000193) >>> 0;
-        h2 = Math.imul(h2 + code, 0x85ebca6b) >>> 0;
-      }
-      h1 = (h1 ^ (h1 >>> 13)) >>> 0;
-      h2 = (h2 ^ (h2 >>> 16)) >>> 0;
-    }
-    return h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
-  }
-
-  async function deriveHash(password, salt, algorithm) {
-    const usePBKDF2 = algorithm === "pbkdf2" && window.crypto && window.crypto.subtle && window.TextEncoder;
-    if (usePBKDF2) {
-      try {
-        const encoder = new TextEncoder();
-        const key = await window.crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-        const bits = await window.crypto.subtle.deriveBits({
-          name: "PBKDF2",
-          salt: hexToBytes(salt),
-          iterations: 140000,
-          hash: "SHA-256"
-        }, key, 256);
-        return "pbkdf2$" + bytesToHex(new Uint8Array(bits));
-      } catch (error) {
-        return "fallback$" + fallbackHash(salt + "::" + password);
-      }
-    }
-    return "fallback$" + fallbackHash(salt + "::" + password);
-  }
-
-  async function createPasswordHash(password) {
-    const salt = randomSalt();
-    const algorithm = window.crypto && window.crypto.subtle && window.TextEncoder ? "pbkdf2" : "fallback";
-    const hash = await deriveHash(password, salt, algorithm);
-    return { salt: salt, passwordHash: hash };
-  }
-
-  async function verifyPassword(password, user) {
-    if (!user || !user.salt || !user.passwordHash) return false;
-    const algorithm = String(user.passwordHash).split("$")[0] === "pbkdf2" ? "pbkdf2" : "fallback";
-    const computed = await deriveHash(password, user.salt, algorithm);
-    if (computed.length !== user.passwordHash.length) return false;
-    let mismatch = 0;
-    for (let i = 0; i < computed.length; i++) mismatch |= computed.charCodeAt(i) ^ user.passwordHash.charCodeAt(i);
-    return mismatch === 0;
-  }
-
-  function readSession() {
-    const stores = [localStorage, sessionStorage];
-    for (let i = 0; i < stores.length; i++) {
-      const raw = safeStoreGet(stores[i], KEYS.session);
-      if (!raw) continue;
-      try {
-        const session = JSON.parse(raw);
-        if (session && session.userId && Number(session.expiresAt) > Date.now()) {
-          return { session: session, store: stores[i] };
-        }
-      } catch (error) { /* تجاهل الجلسة التالفة */ }
-      safeStoreRemove(stores[i], KEYS.session);
-    }
-    return null;
-  }
-
-  function clearSessions() {
-    safeStoreRemove(localStorage, KEYS.session);
-    safeStoreRemove(sessionStorage, KEYS.session);
-  }
-
-  function createSession(userId, remember) {
-    clearSessions();
-    const session = {
-      userId: userId,
-      expiresAt: Date.now() + (remember ? 30 * 86400000 : 12 * 3600000),
-      createdAt: Date.now()
-    };
-    const store = remember ? localStorage : sessionStorage;
-    safeStoreSet(store, KEYS.session, JSON.stringify(session));
+  function authErrorMessage(error) {
+    const message = String((error && error.message) || "");
+    if (/Invalid login credentials/i.test(message)) return "البريد الإلكتروني أو كلمة المرور غير صحيحة.";
+    if (/Email not confirmed/i.test(message)) return "يرجى تأكيد بريدك الإلكتروني أولًا، ثم حاول تسجيل الدخول.";
+    if (/User already registered/i.test(message)) return "هذا البريد مرتبط بحساب موجود بالفعل.";
+    if (/Password should be at least|weak.?password/i.test(message)) return "كلمة المرور يجب أن تكون 8 أحرف على الأقل.";
+    if (/rate limit|too many requests/i.test(message)) return "محاولات كثيرة في وقت قصير. انتظر قليلًا ثم حاول مجددًا.";
+    if (/Anonymous sign-ins are disabled|anonymous_provider_disabled/i.test(message)) return "المساحة التجريبية غير مفعّلة حاليًا. فعّل الدخول المجهول من إعدادات Supabase أو أنشئ حسابًا.";
+    if (/Failed to fetch|NetworkError|fetch failed/i.test(message)) return "تعذّر الاتصال بالخادم. تحقق من اتصالك بالإنترنت.";
+    if (/Invalid API key/i.test(message)) return "مفتاح Supabase العام غير صالح. تحقق من إعدادات الاتصال.";
+    if (/SUPABASE_NOT_CONFIGURED/i.test(message)) return "لم يتم إعداد اتصال Supabase بعد.";
+    return "حدث خطأ غير متوقع. حاول مرة أخرى.";
   }
 
   /* ---------- بيانات تجريبية ---------- */
@@ -449,70 +319,70 @@
     const now = Date.now();
     const tasks = [
       {
-        id: uid("t"), title: "مراجعة عرض العميل النهائي",
+        id: newId(), title: "مراجعة عرض العميل النهائي",
         notes: "التأكد من تحديث الأسعار وإضافة ملاحظات فريق التصميم قبل الإرسال.",
         priority: "high", category: "work", dueDate: today, dueTime: "10:30",
         reminder: "", completed: false, completedAt: null,
         createdAt: new Date(now - 86400000 * 2).toISOString(), updatedAt: new Date(now - 3600000).toISOString(), order: 0
       },
       {
-        id: uid("t"), title: "اجتماع فريق المنتج",
+        id: newId(), title: "اجتماع فريق المنتج",
         notes: "مراجعة أولويات الربع القادم وتوزيع المهام.",
         priority: "medium", category: "work", dueDate: today, dueTime: "13:00",
         reminder: "", completed: false, completedAt: null,
         createdAt: new Date(now - 86400000 * 2).toISOString(), updatedAt: new Date(now - 86400000).toISOString(), order: 1
       },
       {
-        id: uid("t"), title: "30 دقيقة قراءة",
+        id: newId(), title: "30 دقيقة قراءة",
         notes: "استكمال الفصل الثالث من كتاب العادات الذرية.",
         priority: "low", category: "learning", dueDate: today, dueTime: "20:00",
         reminder: "", completed: false, completedAt: null,
         createdAt: new Date(now - 86400000 * 4).toISOString(), updatedAt: new Date(now - 86400000 * 4).toISOString(), order: 2
       },
       {
-        id: uid("t"), title: "الرد على بريد الشراكة",
+        id: newId(), title: "الرد على بريد الشراكة",
         notes: "إرسال النسخة النهائية من العرض وإرفاق ملف الميزانية.",
         priority: "high", category: "work", dueDate: yesterday, dueTime: "16:00",
         reminder: "", completed: false, completedAt: null,
         createdAt: new Date(now - 86400000 * 3).toISOString(), updatedAt: new Date(now - 86400000 * 3).toISOString(), order: 3
       },
       {
-        id: uid("t"), title: "الاشتراك في النادي الصحي",
+        id: newId(), title: "الاشتراك في النادي الصحي",
         notes: "مقارنة الباقات الأسبوعية واختيار الأنسب.",
         priority: "medium", category: "health", dueDate: tomorrow, dueTime: "18:00",
         reminder: "60", completed: false, completedAt: null,
         createdAt: new Date(now - 86400000 * 2).toISOString(), updatedAt: new Date(now - 86400000 * 2).toISOString(), order: 4
       },
       {
-        id: uid("t"), title: "ترتيب مكتب العمل",
+        id: newId(), title: "ترتيب مكتب العمل",
         notes: "تنظيم الملفات الورقية والتخلص من الأوراق غير الضرورية.",
         priority: "low", category: "home", dueDate: "", dueTime: "",
         reminder: "", completed: false, completedAt: null,
         createdAt: new Date(now - 86400000 * 5).toISOString(), updatedAt: new Date(now - 86400000 * 5).toISOString(), order: 5
       },
       {
-        id: uid("t"), title: "إعداد خطة الأسبوع",
+        id: newId(), title: "إعداد خطة الأسبوع",
         notes: "تحديد الأهداف الثلاثة الأهم ومراجعة التقويم.",
         priority: "high", category: "personal", dueDate: today, dueTime: "09:00",
         reminder: "", completed: true, completedAt: isoAtDate(today, 9, 10),
         createdAt: new Date(now - 86400000 * 3).toISOString(), updatedAt: isoAtDate(today, 9, 10), order: 6
       },
       {
-        id: uid("t"), title: "مراجعة درس التصميم",
+        id: newId(), title: "مراجعة درس التصميم",
         notes: "تدوين الملاحظات العملية وتجربة أحد المكونات.",
         priority: "medium", category: "learning", dueDate: yesterday, dueTime: "21:00",
         reminder: "", completed: true, completedAt: isoAtDate(yesterday, 21, 35),
         createdAt: new Date(now - 86400000 * 6).toISOString(), updatedAt: isoAtDate(yesterday, 21, 35), order: 7
       },
       {
-        id: uid("t"), title: "ورشة تجربة المستخدم",
+        id: newId(), title: "ورشة تجربة المستخدم",
         notes: "التحضير لورشة الفريق: العصف الذهني ورسم رحلة المستخدم.",
         priority: "high", category: "work", dueDate: inThreeDays, dueTime: "11:00",
         reminder: "1440", completed: false, completedAt: null,
         createdAt: new Date(now - 86400000).toISOString(), updatedAt: new Date(now - 86400000).toISOString(), order: 8
       },
       {
-        id: uid("t"), title: "شراء هدية العائلة",
+        id: newId(), title: "شراء هدية العائلة",
         notes: "اختيار هدية مناسبة للمناسبة القادمة.",
         priority: "medium", category: "personal", dueDate: inFiveDays, dueTime: "17:30",
         reminder: "60", completed: false, completedAt: null,
@@ -551,8 +421,8 @@
             '<p class="field-error" data-error-for="password"></p>' +
           '</div>' +
           '<div class="form-row-between">' +
-            '<label class="check-line"><input type="checkbox" id="auth-remember" checked><span class="check-box">' + icon("check") + '</span>تذكّرني على هذا الجهاز</label>' +
-            '<span style="font-size:10px;color:var(--faint)">دخول آمن محليًا</span>' +
+            '<span style="font-size:10px;color:var(--faint)">دخول آمن عبر Supabase</span>' +
+            '<span style="font-size:10px;color:var(--faint)">اتصال مشفّر</span>' +
           '</div>' +
           '<div class="auth-alert" id="auth-alert" hidden></div>' +
           '<button class="btn btn-primary btn-lg btn-full" type="submit" id="auth-submit">' +
@@ -562,7 +432,7 @@
         '<div class="auth-divider"><span>أو</span></div>' +
         '<button class="btn-demo" type="button" id="demo-login">' + icon("sparkle") + 'استكشف مساحة عمل تجريبية</button>' +
         '<p class="auth-switch">ليس لديك حساب؟ <button class="link-btn" type="button" data-auth-mode="signup">أنشئ حسابك المجاني</button></p>' +
-        '<div class="auth-trust">' + icon("shield") + '<span>كل حساب مساحة مستقلة، وبياناتك لا تغادر جهازك.</span></div>' +
+        '<div class="auth-trust">' + icon("shield") + '<span>كل حساب مساحة مستقلة، وبياناتك محمية في حسابك السحابي.</span></div>' +
       '</div>'
     );
   }
@@ -614,7 +484,7 @@
           '</button>' +
         '</form>' +
         '<p class="auth-switch">لديك حساب بالفعل؟ <button class="link-btn" type="button" data-auth-mode="login">سجّل الدخول</button></p>' +
-        '<div class="auth-trust">' + icon("shield") + '<span>تُحفظ بياناتك محليًا على هذا المتصفح فقط.</span></div>' +
+        '<div class="auth-trust">' + icon("shield") + '<span>تُحفظ مهامك بأمان في حسابك، ولا يراها مستخدم آخر.</span></div>' +
       '</div>'
     );
   }
@@ -716,6 +586,11 @@
     const password = form.elements.password.value;
     let valid = true;
 
+    if (!API || !API.configured) {
+      showAuthAlert("لم يتم إعداد اتصال Supabase بعد. أضف الإعدادات في supabase-config.js.");
+      return;
+    }
+
     if (isSignup) {
       const name = form.elements.name.value.trim();
       const confirm = form.elements.confirm.value;
@@ -728,36 +603,20 @@
       const submit = $("#auth-submit", form);
       setButtonLoading(submit, true);
       try {
-        const users = getUsers();
-        if (email === DEMO.email) {
-          setFieldError(form, "email", "هذا البريد محجوز للمساحة التجريبية. استخدم بريدًا آخر.");
-          return;
+        const result = await API.auth.signUp(name, email, password, window.location.href);
+        if (result.session && result.user) {
+          await completeSignIn(result.user, "أهلًا بك في مثمر، " + firstName(name) + "! مساحتك جاهزة.");
+        } else {
+          const message = "تم إنشاء حسابك. تحقق من بريدك الإلكتروني لتأكيد الحساب، ثم سجّل الدخول.";
+          showAuthAlert(message, true);
+          window.setTimeout(function () {
+            state.authMode = "login";
+            renderAuth("login");
+            showAuthAlert(message, true);
+          }, 1800);
         }
-        if (users.some(function (user) { return normalizeEmail(user.email) === email; })) {
-          setFieldError(form, "email", "هذا البريد مرتبط بحساب موجود بالفعل.");
-          return;
-        }
-        const hash = await createPasswordHash(password);
-        const user = {
-          id: uid("u"),
-          name: name,
-          email: email,
-          salt: hash.salt,
-          passwordHash: hash.passwordHash,
-          isDemo: false,
-          createdAt: new Date().toISOString()
-        };
-        users.push(user);
-        if (!saveUsers(users)) {
-          showAuthAlert("تعذّر إنشاء الحساب بسبب مشكلة في التخزين المحلي للمتصفح.");
-          return;
-        }
-        const fresh = createEmptyData();
-        safeStoreSet(localStorage, userDataKey(user.id), JSON.stringify(fresh));
-        createSession(user.id, true);
-        completeSignIn(user, "أهلًا بك في مثمر، " + firstName(name) + "! مساحتك جاهزة.");
       } catch (error) {
-        showAuthAlert("حدث خطأ غير متوقع أثناء إنشاء الحساب. حاول مرة أخرى.");
+        showAuthAlert(authErrorMessage(error));
       } finally {
         state.authBusy = false;
         setButtonLoading(submit, false);
@@ -773,24 +632,12 @@
     const submit = $("#auth-submit", form);
     setButtonLoading(submit, true);
     try {
-      const users = getUsers();
-      const user = users.find(function (item) { return normalizeEmail(item.email) === email; });
-      if (!user) {
-        await sleep(320);
-        showAuthAlert("البريد الإلكتروني أو كلمة المرور غير صحيحة.");
-        return;
-      }
-      const ok = await verifyPassword(password, user);
-      if (!ok) {
-        await sleep(250);
-        showAuthAlert("البريد الإلكتروني أو كلمة المرور غير صحيحة.");
-        return;
-      }
-      const remember = $("#auth-remember", form).checked;
-      createSession(user.id, remember);
-      completeSignIn(user, "سعداء بعودتك، " + firstName(user.name) + ".");
+      const result = await API.auth.signIn(email, password);
+      const signedUser = mapAuthUser(result.user);
+      await completeSignIn(result.user, "سعداء بعودتك، " + firstName(signedUser.name) + ".");
     } catch (error) {
-      showAuthAlert("حدث خطأ غير متوقع أثناء تسجيل الدخول. حاول مرة أخرى.");
+      await sleep(300);
+      showAuthAlert(authErrorMessage(error));
     } finally {
       state.authBusy = false;
       setButtonLoading(submit, false);
@@ -800,39 +647,23 @@
   async function handleDemoLogin(event) {
     const button = event.currentTarget;
     if (state.authBusy) return;
+    if (!API || !API.configured) {
+      showAuthAlert("لم يتم إعداد اتصال Supabase بعد. أضف الإعدادات في supabase-config.js.");
+      return;
+    }
     state.authBusy = true;
     button.classList.add("is-loading");
     button.disabled = true;
     try {
-      const users = getUsers();
-      let user = users.find(function (item) { return item.isDemo; });
-      if (!user) {
-        const hash = await createPasswordHash(DEMO.password);
-        user = {
-          id: uid("u"),
-          name: DEMO.name,
-          email: DEMO.email,
-          salt: hash.salt,
-          passwordHash: hash.passwordHash,
-          isDemo: true,
-          createdAt: new Date().toISOString()
-        };
-        users.push(user);
-        if (!saveUsers(users)) {
-          showAuthAlert("تعذّر تجهيز المساحة التجريبية. تحقق من إعدادات التخزين في المتصفح.");
-          return;
-        }
-        safeStoreSet(localStorage, userDataKey(user.id), JSON.stringify(buildDemoData()));
-      } else {
-        const dataRaw = safeStoreGet(localStorage, userDataKey(user.id));
-        if (!dataRaw) {
-          safeStoreSet(localStorage, userDataKey(user.id), JSON.stringify(buildDemoData()));
-        }
-      }
-      createSession(user.id, true);
-      completeSignIn(user, "هذه مساحة تجريبية كاملة. جرّب كل شيء بحرية.");
+      const result = await API.auth.signInAnonymously();
+      const user = result.user;
+      const demo = buildDemoData();
+      await API.tasks.insertMany(demo.tasks, user.id);
+      await API.auth.updateProfile({ full_name: DEMO.name, notifications_asked: false });
+      await completeSignIn(user, "هذه مساحة تجريبية كاملة. جرّب كل شيء بحرية.");
     } catch (error) {
-      showAuthAlert("تعذّر فتح المساحة التجريبية. حاول مرة أخرى.");
+      try { await API.auth.signOut(); } catch (signOutError) { /* تجاهل */ }
+      showAuthAlert(authErrorMessage(error));
     } finally {
       state.authBusy = false;
       button.classList.remove("is-loading");
@@ -841,9 +672,17 @@
   }
 
   /* ---------- الدخول إلى التطبيق ---------- */
-  function completeSignIn(user, message) {
-    state.user = user;
-    state.data = loadUserData(user.id);
+  async function completeSignIn(authUser, message) {
+    if (!authUser) throw new Error("NO_USER");
+    let data;
+    try {
+      data = await loadRemoteData(authUser);
+    } catch (error) {
+      try { await API.auth.signOut(); } catch (signOutError) { /* تجاهل */ }
+      throw error;
+    }
+    state.user = mapAuthUser(authUser);
+    state.data = data;
     state.view = "today";
     state.search = "";
     state.priority = "all";
@@ -864,11 +703,11 @@
     if (message) toast(message, { type: "success" });
   }
 
-  function signOut() {
+  function resetAuthUI() {
     stopEngines();
-    clearSessions();
     state.user = null;
     state.data = null;
+    state.authBusy = false;
     state.view = "today";
     state.search = "";
     state.priority = "all";
@@ -882,30 +721,54 @@
     if (els.searchInput) els.searchInput.value = "";
     updateSearchClear();
     state.authMode = "login";
-    renderAuth("login");
+    if (!API || !API.configured) renderConfigError();
+    else renderAuth("login");
     document.title = "مثمر — مساحتك لإنجاز ما يهم";
     window.scrollTo({ top: 0, behavior: "auto" });
+  }
+
+  async function signOut() {
+    signingOut = true;
+    stopEngines();
+    try {
+      if (API && API.configured) await API.auth.signOut();
+    } catch (error) {
+      /* الجلسة قد تكون منتهية بالفعل */
+    }
+    resetAuthUI();
+    signingOut = false;
     toast("تم تسجيل الخروج بأمان.", { type: "success" });
   }
 
-  function restoreSession() {
-    const stored = readSession();
-    if (!stored) return false;
-    const users = getUsers();
-    const user = users.find(function (item) { return item.id === stored.session.userId; });
-    if (!user) {
-      clearSessions();
+  async function restoreSession() {
+    if (!API || !API.configured) return false;
+    try {
+      const session = await API.auth.getSession();
+      if (!session || !session.user) return false;
+      await completeSignIn(session.user);
+      return true;
+    } catch (error) {
+      try { await API.auth.signOut(); } catch (signOutError) { /* تجاهل */ }
       return false;
     }
-    state.user = user;
-    state.data = loadUserData(user.id);
-    els.authScreen.hidden = true;
-    els.workspace.hidden = false;
-    updateChrome();
-    renderView();
-    startEngines();
-    document.title = "لوحة اليوم — مثمر";
-    return true;
+  }
+
+  function renderConfigError() {
+    if (!els.authRoot) return;
+    els.authScreen.hidden = false;
+    els.workspace.hidden = true;
+    const libraryMissing = !window.supabase;
+    const lead = libraryMissing
+      ? "تعذّر تحميل مكتبة Supabase من شبكة CDN. تحقق من اتصالك بالإنترنت ثم أعد تحميل الصفحة."
+      : "لم يتم العثور على إعدادات اتصال صالحة. أضف عنوان المشروع والمفتاح العام في ملف <code>supabase-config.js</code> ثم أعد تحميل الصفحة.";
+    els.authRoot.innerHTML =
+      '<div class="auth-card">' +
+        '<span class="auth-kicker">إعداد مطلوب</span>' +
+        '<h1 class="auth-title">اربط مثمر بـ <span>Supabase</span></h1>' +
+        '<p class="auth-lead">' + lead + '</p>' +
+        '<div class="auth-alert">' + icon("alert") + '<span>استخدم المفتاح العام (anon / publishable) فقط، ولا تضع مفتاح service_role في الواجهة أبدًا.</span></div>' +
+        '<div class="auth-trust">' + icon("shield") + '<span>ملف الإعدادات مستثنى من Git، ولن يُرفع إلى المستودع.</span></div>' +
+      '</div>';
   }
 
   /* ---------- الشريط الجانبي والإحصاءات ---------- */
@@ -1194,26 +1057,28 @@
     }
   }
 
-  function checkReminders() {
-    if (!state.user || !state.data) return;
+  async function checkReminders() {
+    if (!state.user || !state.data || !API || !API.configured) return;
     const now = Date.now();
-    let changed = false;
+    const sentAt = new Date().toISOString();
+    const changedTasks = [];
     state.data.tasks.forEach(function (task) {
       if (task.completed || !task.reminder || !task.dueDate || !task.dueTime) return;
       const remindAt = reminderTimestamp(task);
       const dueAt = dueTimestamp(task);
       if (!remindAt || !dueAt) return;
       if (now < remindAt || now > dueAt + 6 * 3600000) return;
-      const signature = task.dueDate + "|" + task.dueTime + "|" + task.reminder;
-      if (task.reminderSentAt === signature) return;
-      task.reminderSentAt = signature;
-      changed = true;
+      if (task.reminderSentAt) return;
+      task.reminderSentAt = sentAt;
+      changedTasks.push(task);
       fireReminder(task);
     });
-    if (changed) {
-      persistData();
+    if (changedTasks.length) {
       updateNotificationBadge();
       if (!els.notifPanel.hidden) renderNotifications();
+      await Promise.all(changedTasks.map(function (task) {
+        return API.tasks.markReminderSent(task.id, sentAt).catch(function () { /* التذكير ظهر محليًا */ });
+      }));
     }
   }
 
@@ -1261,7 +1126,7 @@
       const permission = await Notification.requestPermission();
       if (permission === "granted") {
         state.data.settings.notificationsAsked = true;
-        persistData();
+        saveNotificationsAsked(true);
         toast("تم تفعيل إشعارات المتصفح. سنذكّرك في الوقت المناسب.", { type: "success" });
         sendTestNotification();
         if (!els.notifPanel.hidden) renderNotifications();
@@ -1930,7 +1795,7 @@
         kicker: "مساحتك الشخصية",
         title: "الإعدادات",
         subtitle: "تحكم بحسابك وتفضيلاتك وبياناتك. كل شيء هنا خاص بك وحدك.",
-        actions: '<span class="date-chip">' + icon("shield") + 'حساب محلي خاص</span>'
+        actions: '<span class="date-chip">' + icon("shield") + 'حساب سحابي خاص</span>'
       }) +
       '<div class="settings-wrap">' +
         '<div class="settings-grid">' +
@@ -1949,7 +1814,7 @@
               '<div class="form-group"><label for="settings-email">البريد الإلكتروني</label>' +
                 '<input class="form-input" id="settings-email" name="email" type="email" dir="ltr" value="' + esc(user.email) + '"' + (isDemo ? " disabled" : "") + ' autocomplete="email">' +
               '</div>' +
-              (isDemo ? '<div class="settings-note">' + icon("sparkle") + '<span>هذه مساحة تجريبية. يمكنك تغيير الاسم، لكن البريد محجوز للحساب التجريبي.</span></div>' : '') +
+              (isDemo ? '<div class="settings-note">' + icon("sparkle") + '<span>هذه مساحة تجريبية مجهولة الهوية. يمكنك تغيير الاسم، ولا يرتبط البريد بحساب دائم.</span></div>' : '') +
               '<div class="form-feedback" id="profile-feedback"></div>' +
               '<div class="settings-actions"><button class="btn btn-primary" type="submit">' + icon("check") + 'حفظ التغييرات</button></div>' +
             '</form>' +
@@ -1960,18 +1825,20 @@
               '<span class="settings-icon is-gold">' + icon("lock") + '</span>' +
               '<div><h2>الأمان</h2><p>غيّر كلمة المرور الخاصة بحسابك.</p></div>' +
             '</div>' +
-            '<form class="settings-form" id="settings-password-form" novalidate>' +
-              '<div class="form-group"><label for="current-password">كلمة المرور الحالية</label>' +
-                '<input class="form-input" id="current-password" name="current_password" type="password" dir="ltr" autocomplete="current-password" placeholder="••••••••"></div>' +
-              '<div class="settings-form-row">' +
-                '<div class="form-group"><label for="new-password">كلمة المرور الجديدة</label>' +
-                  '<input class="form-input" id="new-password" name="new_password" type="password" dir="ltr" autocomplete="new-password" placeholder="8 أحرف على الأقل"></div>' +
-                '<div class="form-group"><label for="confirm-password">تأكيد الجديدة</label>' +
-                  '<input class="form-input" id="confirm-password" name="confirm_password" type="password" dir="ltr" autocomplete="new-password" placeholder="••••••••"></div>' +
-              '</div>' +
-              '<div class="form-feedback" id="password-feedback"></div>' +
-              '<div class="settings-actions"><button class="btn btn-primary" type="submit">' + icon("lock") + 'تحديث كلمة المرور</button></div>' +
-            '</form>' +
+            (isDemo
+              ? '<div class="settings-form"><div class="settings-note">' + icon("sparkle") + '<span>المساحة التجريبية لا تستخدم كلمة مرور. أنشئ حسابًا دائمًا لحماية بياناتك والوصول إليها من أي جهاز.</span></div></div>'
+              : '<form class="settings-form" id="settings-password-form" novalidate>' +
+                  '<div class="form-group"><label for="current-password">كلمة المرور الحالية</label>' +
+                    '<input class="form-input" id="current-password" name="current_password" type="password" dir="ltr" autocomplete="current-password" placeholder="••••••••"></div>' +
+                  '<div class="settings-form-row">' +
+                    '<div class="form-group"><label for="new-password">كلمة المرور الجديدة</label>' +
+                      '<input class="form-input" id="new-password" name="new_password" type="password" dir="ltr" autocomplete="new-password" placeholder="8 أحرف على الأقل"></div>' +
+                    '<div class="form-group"><label for="confirm-password">تأكيد الجديدة</label>' +
+                      '<input class="form-input" id="confirm-password" name="confirm_password" type="password" dir="ltr" autocomplete="new-password" placeholder="••••••••"></div>' +
+                  '</div>' +
+                  '<div class="form-feedback" id="password-feedback"></div>' +
+                  '<div class="settings-actions"><button class="btn btn-primary" type="submit">' + icon("lock") + 'تحديث كلمة المرور</button></div>' +
+                '</form>') +
           '</section>' +
 
           '<section class="settings-card">' +
@@ -2011,9 +1878,9 @@
           '</section>' +
         '</div>' +
         '<div class="privacy-note">' + icon("shield") +
-          '<div><strong>خصوصيتك ليست إعدادًا اختياريًا</strong><p>يعمل مثمر بالكامل داخل متصفحك. تُحفظ كل مهمة في مساحة منفصلة تخص حسابك، ولا يمكن الوصول إليها من حساب آخر داخل التطبيق. كلمة مرورك محفوظة بصيغة مشفّرة (hash) ولا تُخزّن كنص واضح.</p></div>' +
+          '<div><strong>خصوصيتك ليست إعدادًا اختياريًا</strong><p>تُحفظ مهامك في قاعدة بيانات Supabase داخل صفوف مرتبطة بحسابك، وتفرض سياسات RLS أن لا يقرأ أو يعدّل أي مستخدم بيانات غيره. كلمة مرورك يديرها Supabase Auth ولا تُخزّن كنص واضح في التطبيق.</p></div>' +
         '</div>' +
-        '<div class="version-note"><span>مثمر · الإصدار 1.0</span><span>بياناتك تبقى على هذا الجهاز</span></div>' +
+        '<div class="version-note"><span>مثمر · الإصدار 1.0</span><span>بياناتك محفوظة في حسابك السحابي</span></div>' +
       '</div>'
     );
   }
@@ -2275,8 +2142,9 @@
     if (dateInput) dateInput.addEventListener("change", function () { updateReminderHint(form); });
     if (timeInput) timeInput.addEventListener("change", function () { updateReminderHint(form); });
 
-    form.addEventListener("submit", function (event) {
+    form.addEventListener("submit", async function (event) {
       event.preventDefault();
+      if (!API || !API.configured || !state.user) return;
       const feedback = $("#task-form-feedback", form);
       const titleError = $('[data-error-for="title"]', form);
       if (feedback) { feedback.className = "form-feedback"; feedback.textContent = ""; }
@@ -2306,41 +2174,58 @@
         return;
       }
       const nowIso = new Date().toISOString();
-      if (isEdit) {
-        const scheduleChanged = existing.dueDate !== dueDate || existing.dueTime !== dueTime || String(existing.reminder || "") !== reminder;
-        existing.title = title;
-        existing.notes = notes;
-        existing.priority = priority;
-        existing.category = category;
-        existing.dueDate = dueDate;
-        existing.dueTime = dueTime;
-        existing.reminder = reminder;
-        existing.updatedAt = nowIso;
-        if (scheduleChanged) existing.reminderSentAt = null;
-      } else {
-        const maxOrder = state.data.tasks.reduce(function (max, item) { return Math.max(max, Number(item.order) || 0); }, 0);
-        state.data.tasks.push({
-          id: uid("t"),
-          title: title,
-          notes: notes,
-          priority: priority,
-          category: category,
-          dueDate: dueDate,
-          dueTime: dueTime,
-          reminder: reminder,
-          reminderSentAt: null,
-          completed: false,
-          completedAt: null,
-          createdAt: nowIso,
-          updatedAt: nowIso,
-          order: maxOrder + 1
-        });
+      const submitButton = $('button[type="submit"]', form);
+      setButtonLoading(submitButton, true);
+      try {
+        if (isEdit) {
+          const scheduleChanged = existing.dueDate !== dueDate || existing.dueTime !== dueTime || String(existing.reminder || "") !== reminder;
+          const updated = Object.assign({}, existing, {
+            title: title,
+            notes: notes,
+            priority: priority,
+            category: category,
+            dueDate: dueDate,
+            dueTime: dueTime,
+            reminder: reminder,
+            reminderSentAt: scheduleChanged ? null : existing.reminderSentAt,
+            updatedAt: nowIso
+          });
+          const saved = await API.tasks.update(updated);
+          const index = state.data.tasks.findIndex(function (item) { return item.id === existing.id; });
+          if (index >= 0) state.data.tasks[index] = saved;
+        } else {
+          const maxOrder = state.data.tasks.reduce(function (max, item) { return Math.max(max, Number(item.order) || 0); }, 0);
+          const draft = {
+            id: newId(),
+            title: title,
+            notes: notes,
+            priority: priority,
+            category: category,
+            dueDate: dueDate,
+            dueTime: dueTime,
+            reminder: reminder,
+            reminderSentAt: null,
+            completed: false,
+            completedAt: null,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            order: maxOrder + 1
+          };
+          const saved = await API.tasks.insert(draft, state.user.id);
+          state.data.tasks.push(saved);
+        }
+        modal.close();
+        updateChrome();
+        renderView();
+        toast(isEdit ? "تم حفظ تعديلات المهمة." : "أُضيفت المهمة إلى خطتك.", { type: "success" });
+      } catch (error) {
+        if (feedback) {
+          feedback.className = "form-feedback is-error";
+          feedback.textContent = "تعذّر حفظ المهمة. تحقق من اتصالك ثم حاول مجددًا.";
+        }
+      } finally {
+        setButtonLoading(submitButton, false);
       }
-      persistData();
-      modal.close();
-      updateChrome();
-      renderView();
-      toast(isEdit ? "تم حفظ تعديلات المهمة." : "أُضيفت المهمة إلى خطتك.", { type: "success" });
     });
   }
 
@@ -2360,15 +2245,19 @@
   }
 
   /* ---------- إجراءات المهام ---------- */
-  function toggleTaskCompletion(taskId) {
+  async function toggleTaskCompletion(taskId) {
+    if (savingTaskIds.has(taskId)) return;
     const task = state.data.tasks.find(function (item) { return item.id === taskId; });
-    if (!task) return;
+    if (!task || !API || !API.configured) return;
     const wasCompleted = task.completed;
     const previousCompletedAt = task.completedAt;
-    task.completed = !wasCompleted;
-    task.completedAt = task.completed ? new Date().toISOString() : null;
-    task.updatedAt = new Date().toISOString();
-    persistData();
+    const nextCompleted = !wasCompleted;
+    const nextCompletedAt = nextCompleted ? new Date().toISOString() : null;
+    const nextUpdatedAt = new Date().toISOString();
+    savingTaskIds.add(taskId);
+    task.completed = nextCompleted;
+    task.completedAt = nextCompletedAt;
+    task.updatedAt = nextUpdatedAt;
     const row = document.querySelector('[data-task-row="' + taskId + '"]');
     if (row) {
       row.classList.toggle("is-completed", task.completed);
@@ -2377,6 +2266,20 @@
       if (check) check.setAttribute("aria-checked", task.completed ? "true" : "false");
     }
     updateChrome();
+    try {
+      const saved = await API.tasks.update(task);
+      Object.assign(task, saved);
+    } catch (error) {
+      task.completed = wasCompleted;
+      task.completedAt = previousCompletedAt;
+      task.updatedAt = new Date().toISOString();
+      updateChrome();
+      renderView();
+      toast("تعذّر تحديث حالة المهمة. تحقق من اتصالك وحاول مجددًا.", { type: "error" });
+      return;
+    } finally {
+      savingTaskIds.delete(taskId);
+    }
     if (pendingTaskRender) clearTimeout(pendingTaskRender);
     pendingTaskRender = window.setTimeout(function () {
       pendingTaskRender = null;
@@ -2385,15 +2288,28 @@
     toast(task.completed ? "أحسنت! أُنجزت «" + task.title + "»." : "أُعيدت «" + task.title + "» إلى قائمة مهامك.", {
       type: "success",
       actionLabel: "تراجع",
-      onAction: function () {
-        if (pendingTaskRender) { clearTimeout(pendingTaskRender); pendingTaskRender = null; }
+      onAction: async function () {
+        if (savingTaskIds.has(taskId)) return;
+        savingTaskIds.add(taskId);
         task.completed = wasCompleted;
         task.completedAt = previousCompletedAt;
         task.updatedAt = new Date().toISOString();
-        persistData();
-        updateChrome();
-        renderView();
-        toast("تم التراجع عن آخر تغيير.", { type: "success" });
+        try {
+          const saved = await API.tasks.update(task);
+          Object.assign(task, saved);
+          if (pendingTaskRender) { clearTimeout(pendingTaskRender); pendingTaskRender = null; }
+          updateChrome();
+          renderView();
+          toast("تم التراجع عن آخر تغيير.", { type: "success" });
+        } catch (error) {
+          task.completed = nextCompleted;
+          task.completedAt = nextCompletedAt;
+          updateChrome();
+          renderView();
+          toast("تعذّر التراجع عن التغيير. تحقق من اتصالك.", { type: "error" });
+        } finally {
+          savingTaskIds.delete(taskId);
+        }
       }
     });
   }
@@ -2408,8 +2324,13 @@
       icon: "trash"
     });
     if (!confirmed) return;
+    try {
+      await API.tasks.remove(taskId);
+    } catch (error) {
+      toast("تعذّر حذف المهمة. تحقق من اتصالك وحاول مجددًا.", { type: "error" });
+      return;
+    }
     state.data.tasks = state.data.tasks.filter(function (item) { return item.id !== taskId; });
-    persistData();
     closeNotifications();
     updateChrome();
     renderView();
@@ -2423,8 +2344,9 @@
     element.textContent = message;
   }
 
-  function handleProfileSubmit(event) {
+  async function handleProfileSubmit(event) {
     event.preventDefault();
+    if (!API || !API.configured || !state.user) return;
     const form = event.target;
     const feedback = $("#profile-feedback", form);
     if (feedback) { feedback.className = "form-feedback"; feedback.textContent = ""; }
@@ -2440,31 +2362,41 @@
       form.elements.email.focus();
       return;
     }
-    const users = getUsers();
-    const finalEmail = state.user.isDemo ? state.user.email : email;
-    const duplicate = users.some(function (user) {
-      return user.id !== state.user.id && normalizeEmail(user.email) === finalEmail;
-    });
-    if (duplicate) {
-      setFormFeedback(feedback, "هذا البريد مرتبط بحساب آخر على هذا الجهاز.");
-      form.elements.email.focus();
-      return;
+    const submitButton = $('button[type="submit"]', form);
+    setButtonLoading(submitButton, true);
+    try {
+      const profile = await API.auth.updateProfile({ full_name: name });
+      state.user.name = String((profile.user && profile.user.user_metadata && profile.user.user_metadata.full_name) || name).trim();
+      let message = "تم تحديث بيانات حسابك.";
+      if (!state.user.isDemo && email && email !== normalizeEmail(state.user.email)) {
+        try {
+          const result = await API.auth.updateEmail(email);
+          if (result.user && normalizeEmail(result.user.email) === email) {
+            state.user.email = result.user.email;
+            message = "تم تحديث الاسم والبريد الإلكتروني.";
+          } else {
+            message = "تم تحديث الاسم. أرسلنا رابط تأكيد إلى البريد الجديد؛ لن يتغير البريد حتى تؤكده.";
+          }
+        } catch (emailError) {
+          updateChrome();
+          renderView();
+          toast("تم تحديث الاسم، لكن تعذّر تغيير البريد: " + authErrorMessage(emailError), { type: "error" });
+          return;
+        }
+      }
+      updateChrome();
+      renderView();
+      toast(message, { type: "success" });
+    } catch (error) {
+      setFormFeedback(feedback, authErrorMessage(error));
+    } finally {
+      setButtonLoading(submitButton, false);
     }
-    state.user.name = name;
-    state.user.email = finalEmail;
-    state.user.updatedAt = new Date().toISOString();
-    const updatedUsers = users.map(function (user) { return user.id === state.user.id ? state.user : user; });
-    if (!saveUsers(updatedUsers)) {
-      setFormFeedback(feedback, "تعذّر حفظ التغييرات في التخزين المحلي.");
-      return;
-    }
-    updateChrome();
-    renderView();
-    toast("تم تحديث بيانات حسابك.", { type: "success" });
   }
 
   async function handlePasswordSubmit(event) {
     event.preventDefault();
+    if (!API || !API.configured || !state.user || state.user.isDemo) return;
     const form = event.target;
     const feedback = $("#password-feedback", form);
     if (feedback) { feedback.className = "form-feedback"; feedback.textContent = ""; }
@@ -2494,25 +2426,22 @@
     const submitButton = $('button[type="submit"]', form);
     setButtonLoading(submitButton, true);
     try {
-      const ok = await verifyPassword(current, state.user);
-      if (!ok) {
-        setFormFeedback(feedback, "كلمة المرور الحالية غير صحيحة.");
-        form.elements.current_password.focus();
+      try {
+        await API.auth.signIn(normalizeEmail(state.user.email), current);
+      } catch (verifyError) {
+        if (/Invalid login credentials/i.test(String((verifyError && verifyError.message) || ""))) {
+          setFormFeedback(feedback, "كلمة المرور الحالية غير صحيحة.");
+          form.elements.current_password.focus();
+        } else {
+          setFormFeedback(feedback, authErrorMessage(verifyError));
+        }
         return;
       }
-      const hash = await createPasswordHash(next);
-      state.user.salt = hash.salt;
-      state.user.passwordHash = hash.passwordHash;
-      state.user.updatedAt = new Date().toISOString();
-      const users = getUsers().map(function (user) { return user.id === state.user.id ? state.user : user; });
-      if (!saveUsers(users)) {
-        setFormFeedback(feedback, "تعذّر حفظ كلمة المرور في التخزين المحلي.");
-        return;
-      }
+      await API.auth.updatePassword(next);
       form.reset();
       toast("تم تحديث كلمة المرور بنجاح.", { type: "success" });
     } catch (error) {
-      setFormFeedback(feedback, "تعذّر تحديث كلمة المرور. حاول مرة أخرى.");
+      setFormFeedback(feedback, authErrorMessage(error));
     } finally {
       setButtonLoading(submitButton, false);
     }
@@ -2578,7 +2507,7 @@
     const createdAtRaw = raw.createdAt ? new Date(raw.createdAt) : new Date();
     const createdAt = Number.isNaN(createdAtRaw.getTime()) ? new Date().toISOString() : createdAtRaw.toISOString();
     return {
-      id: uid("t"),
+      id: newId(),
       title: title,
       notes: typeof raw.notes === "string" ? raw.notes.trim().slice(0, 900) : "",
       priority: priority,
@@ -2616,8 +2545,8 @@
         danger: false
       });
       if (!confirmed) return;
-      state.data.tasks = imported;
-      persistData();
+      const savedTasks = await API.tasks.replace(imported);
+      state.data.tasks = savedTasks;
       closeNotifications();
       updateChrome();
       renderView();
@@ -2640,8 +2569,13 @@
       icon: "trash"
     });
     if (!confirmed) return;
+    try {
+      await API.tasks.removeCompleted();
+    } catch (error) {
+      toast("تعذّر مسح المهام المكتملة. تحقق من اتصالك وحاول مجددًا.", { type: "error" });
+      return;
+    }
     state.data.tasks = state.data.tasks.filter(function (task) { return !task.completed; });
-    persistData();
     updateChrome();
     renderView();
     toast("تم مسح المهام المكتملة.", { type: "success" });
@@ -2650,35 +2584,21 @@
   async function deleteAccount() {
     const confirmed = await askConfirm({
       title: "حذف الحساب نهائيًا؟",
-      message: "سيتم حذف حسابك وكل مهامك وإعداداتك من هذا الجهاز. لا يمكن التراجع عن هذا الإجراء.",
+      message: "سيتم حذف حسابك وكل مهامك نهائيًا من قاعدة البيانات. لا يمكن التراجع عن هذا الإجراء.",
       confirmLabel: "حذف حسابي",
       icon: "trash"
     });
     if (!confirmed) return;
-    const userId = state.user.id;
-    const users = getUsers().filter(function (user) { return user.id !== userId; });
-    if (!saveUsers(users)) {
-      toast("تعذّر حذف الحساب. حاول مرة أخرى.", { type: "error" });
+    try {
+      await API.auth.deleteAccount();
+    } catch (error) {
+      toast("تعذّر حذف الحساب. قد تحتاج إلى تثبيت دالة الحذف من ملف SQL أولًا.", { type: "error" });
       return;
     }
-    safeStoreRemove(localStorage, userDataKey(userId));
-    stopEngines();
-    clearSessions();
-    if (pendingTaskRender) { clearTimeout(pendingTaskRender); pendingTaskRender = null; }
-    state.user = null;
-    state.data = null;
-    state.view = "today";
-    state.search = "";
-    closeNotifications();
-    closeSidebar();
-    els.workspace.hidden = true;
-    els.authScreen.hidden = false;
-    if (els.searchInput) els.searchInput.value = "";
-    updateSearchClear();
-    state.authMode = "login";
-    renderAuth("login");
-    document.title = "مثمر — مساحتك لإنجاز ما يهم";
-    window.scrollTo({ top: 0, behavior: "auto" });
+    signingOut = true;
+    try { await API.auth.signOut(); } catch (error) { /* الحساب محذوف بالفعل */ }
+    resetAuthUI();
+    signingOut = false;
     toast("تم حذف حسابك وبياناته. نتمنى أن نراك مرة أخرى.", { type: "success" });
   }
 
@@ -2717,7 +2637,9 @@
     document.addEventListener("change", handleDocumentChange);
     document.addEventListener("submit", handleDocumentSubmit);
     document.addEventListener("keydown", handleGlobalKeydown);
-    window.addEventListener("storage", handleStorageSync);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) refreshFromServer();
+    });
   }
 
   function clearSearch() {
@@ -2895,30 +2817,20 @@
     }
   }
 
-  function handleStorageSync(event) {
-    if (!state.user || !event.key) return;
-    if (event.key === userDataKey(state.user.id) && event.newValue) {
-      try {
-        state.data = normalizeData(JSON.parse(event.newValue));
-        updateChrome();
-        renderView();
-      } catch (error) { /* تجاهل البيانات التالفة */ }
-      return;
-    }
-    if (event.key === KEYS.users) {
-      const users = getUsers();
-      const current = users.find(function (user) { return user.id === state.user.id; });
-      if (!current) {
-        signOut();
-      } else {
-        state.user = current;
-        updateChrome();
-      }
+  async function refreshFromServer() {
+    if (!state.user || !API || !API.configured || activeModal || document.hidden || savingTaskIds.size) return;
+    try {
+      const tasks = await API.tasks.list();
+      state.data.tasks = tasks;
+      updateChrome();
+      renderView();
+    } catch (error) {
+      /* اتصال مؤقتًا غير متاح؛ نُبقي النسخة المعروضة */
     }
   }
 
   /* ---------- التشغيل ---------- */
-  function init() {
+  async function init() {
     els = {
       authScreen: $("#auth-screen"),
       authRoot: $("#auth-root"),
@@ -2937,10 +2849,24 @@
       toastRoot: $("#toast-root")
     };
     bindStaticEvents();
-    if (!restoreSession()) {
+    if (API && API.configured) {
+      API.auth.onAuthStateChange(function (event, session) {
+        if (event === "SIGNED_OUT" && state.user && !signingOut) {
+          resetAuthUI();
+          toast("انتهت جلستك. سجّل الدخول مجددًا للمتابعة.", { type: "error" });
+        }
+        if (event === "USER_UPDATED" && session && state.user) {
+          state.user = mapAuthUser(session.user);
+          updateChrome();
+        }
+      });
+    }
+    const restored = await restoreSession();
+    if (!restored) {
       els.workspace.hidden = true;
       els.authScreen.hidden = false;
-      renderAuth("login");
+      if (!API || !API.configured) renderConfigError();
+      else renderAuth("login");
     }
     if (els.searchInput) {
       els.searchInput.setAttribute("autocomplete", "off");

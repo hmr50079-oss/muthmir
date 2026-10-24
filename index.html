@@ -177,7 +177,7 @@
       <ul class="auth-features">
         <li><span class="feature-icon"><svg><use href="#i-target"></use></svg></span><div><strong>أولوياتك أولًا</strong><small>رتّب مهامك بحسب أهميتها لا بحسب ضجيجها.</small></div></li>
         <li><span class="feature-icon"><svg><use href="#i-bell"></use></svg></span><div><strong>تذكيرات في وقتها</strong><small>خطط للمستقبل واترك التذكير علينا.</small></div></li>
-        <li><span class="feature-icon"><svg><use href="#i-lock"></use></svg></span><div><strong>خصوصية لكل حساب</strong><small>بياناتك وحدك، محفوظة على هذا الجهاز.</small></div></li>
+        <li><span class="feature-icon"><svg><use href="#i-lock"></use></svg></span><div><strong>خصوصية لكل حساب</strong><small>بياناتك وحدك، محفوظة بأمان في حسابك.</small></div></li>
       </ul>
     </div>
 
@@ -232,13 +232,13 @@
         <span class="brand-symbol"><svg><use href="#i-mark"></use></svg></span>
         <span class="brand-type"><strong>مثمر</strong><small>MUTHMIR</small></span>
       </a>
-      <span class="surface-chip">نسخة المتصفح</span>
+      <span class="surface-chip">نسخة سحابية</span>
     </div>
 
     <div class="auth-form-wrap" id="auth-root"></div>
 
     <footer class="auth-main-foot">
-      <span><svg><use href="#i-shield"></use></svg> كلمة مرورك محمية، وبياناتك محفوظة محليًا على جهازك.</span>
+      <span><svg><use href="#i-shield"></use></svg> كلمة مرورك محمية، وبياناتك محفوظة بأمان في حسابك.</span>
       <span>© ٢٠٢٦ مثمر</span>
     </footer>
   </main>
@@ -347,6 +347,9 @@
 <div id="modal-root"></div>
 <div id="toast-root" class="toast-stack" role="status" aria-live="polite"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js"></script>
+<script src="supabase-config.js"></script>
+<script src="supabase-api.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
